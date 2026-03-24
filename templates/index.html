@@ -154,14 +154,32 @@
         </div>
         
         <div class="card chart-card">
-            <h3>系统状态</h3>
-            <p style="color: #94a3b8;">数据每 30 秒自动刷新一次。</p>
-            <p id="updateTime" style="font-size: 0.8rem; color: #64748b;"></p>
+            <h3>近7日留存趋势</h3>
+            <div id="retentionChart"></div>
+        </div>
+
+        <!-- 留存数据卡片 -->
+        <div class="card stat-card">
+            <div class="stat-label">昨日新用户</div>
+            <div id="yesterdayNewUsers" class="stat-value">--</div>
+        </div>
+        <div class="card stat-card">
+            <div class="stat-label">次日留存率</div>
+            <div id="day1Retention" class="stat-value">--</div>
+        </div>
+        <div class="card stat-card">
+            <div class="stat-label">三日留存率</div>
+            <div id="day3Retention" class="stat-value">--</div>
+        </div>
+        <div class="card stat-card">
+            <div class="stat-label">七日留存率</div>
+            <div id="day7Retention" class="stat-value">--</div>
         </div>
 
         <!-- SQL 控制台 -->
         <div class="card sql-card">
             <h3>远程 SQL 控制台</h3>
+            <p id="updateTime" style="font-size: 0.8rem; color: #64748b; margin-top: -10px; margin-bottom: 10px;"></p>
             <textarea id="sqlInput" placeholder="请输入 ClickHouse SQL 语句... (例如: select * from game_events limit 10)"></textarea>
             <div>
                 <button onclick="executeSQL()">执行查询</button>
@@ -200,6 +218,30 @@
                 
                 if (levelData.code === 200) {
                     updateLevelChart(levelData.data.level_distribution);
+                }
+
+                // 获取留存趋势数据
+                const retentionRes = await fetch('/api/retention/trend?days=7');
+                const retentionData = await retentionRes.json();
+                
+                if (retentionData.code === 200) {
+                    updateRetentionChart(retentionData.data.trend);
+                    // 更新昨日留存数据
+                    const yesterday = retentionData.data.trend[retentionData.data.trend.length - 1];
+                    if (yesterday) {
+                        document.getElementById('yesterdayNewUsers').innerText = yesterday.total_new_users.toLocaleString();
+                        document.getElementById('day1Retention').innerText = yesterday.day1_rate + '%';
+                    }
+                }
+
+                // 获取昨日详细留存数据（包含3日和7日留存）
+                const yesterdayStr = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+                const detailRes = await fetch('/api/retention/' + yesterdayStr);
+                const detailData = await detailRes.json();
+                
+                if (detailData.code === 200) {
+                    document.getElementById('day3Retention').innerText = detailData.data.day3_rate + '%';
+                    document.getElementById('day7Retention').innerText = detailData.data.day7_rate + '%';
                 }
 
                 document.getElementById('updateTime').innerText = '最后更新时间: ' + new Date().toLocaleTimeString();
@@ -256,6 +298,90 @@
             levelChart.setOption(option);
         }
 
+        let retentionChart = null;
+
+        function updateRetentionChart(data) {
+            if (!retentionChart) {
+                retentionChart = echarts.init(document.getElementById('retentionChart'), 'dark');
+            }
+
+            const dates = data.map(item => item.date);
+            const rates = data.map(item => item.day1_rate);
+            const newUsers = data.map(item => item.total_new_users);
+
+            const option = {
+                backgroundColor: 'transparent',
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' }
+                },
+                legend: {
+                    data: ['次日留存率', '新增用户数'],
+                    textStyle: { color: '#94a3b8' }
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '3%',
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    data: dates,
+                    axisLine: { lineStyle: { color: '#475569' } },
+                    axisLabel: { color: '#94a3b8' }
+                },
+                yAxis: [
+                    {
+                        type: 'value',
+                        name: '留存率(%)',
+                        nameTextStyle: { color: '#94a3b8' },
+                        axisLine: { lineStyle: { color: '#475569' } },
+                        axisLabel: { 
+                            color: '#94a3b8',
+                            formatter: '{value}%'
+                        },
+                        splitLine: { lineStyle: { color: '#334155' } }
+                    },
+                    {
+                        type: 'value',
+                        name: '新增用户',
+                        nameTextStyle: { color: '#94a3b8' },
+                        axisLine: { lineStyle: { color: '#475569' } },
+                        axisLabel: { color: '#94a3b8' },
+                        splitLine: { show: false }
+                    }
+                ],
+                series: [
+                    {
+                        name: '次日留存率',
+                        type: 'line',
+                        smooth: true,
+                        data: rates,
+                        itemStyle: { color: '#38bdf8' },
+                        areaStyle: {
+                            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                { offset: 0, color: 'rgba(56, 189, 248, 0.3)' },
+                                { offset: 1, color: 'rgba(56, 189, 248, 0.05)' }
+                            ])
+                        }
+                    },
+                    {
+                        name: '新增用户数',
+                        type: 'bar',
+                        yAxisIndex: 1,
+                        data: newUsers,
+                        itemStyle: { 
+                            color: 'rgba(168, 85, 247, 0.6)',
+                            borderRadius: [4, 4, 0, 0]
+                        }
+                    }
+                ]
+            };
+
+            retentionChart.setOption(option);
+        }
+
         async function executeSQL() {
             const sql = document.getElementById('sqlInput').value.trim();
             const container = document.getElementById('sqlResultContainer');
@@ -284,10 +410,22 @@
                     });
                     html += '</tr></thead><tbody>';
                     
+                    function formatCell(cell) {
+                        if (cell === null) return 'NULL';
+                        if (typeof cell === 'object') {
+                            try {
+                                return JSON.stringify(cell);
+                            } catch (e) {
+                                return String(cell);
+                            }
+                        }
+                        return String(cell);
+                    }
+
                     result.data.rows.forEach(row => {
                         html += '<tr>';
                         row.forEach(cell => {
-                            html += `<td>${cell !== null ? cell : 'NULL'}</td>`;
+                            html += `<td>${formatCell(cell)}</td>`;
                         });
                         html += '</tr>';
                     });
@@ -309,6 +447,7 @@
         // 响应式图表
         window.addEventListener('resize', () => {
             levelChart && levelChart.resize();
+            retentionChart && retentionChart.resize();
         });
     </script>
 </body>
