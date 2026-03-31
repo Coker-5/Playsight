@@ -226,11 +226,14 @@
                 
                 if (retentionData.code === 200) {
                     updateRetentionChart(retentionData.data.trend);
-                    // 更新昨日留存数据
-                    const yesterday = retentionData.data.trend[retentionData.data.trend.length - 1];
-                    if (yesterday) {
-                        document.getElementById('yesterdayNewUsers').innerText = yesterday.total_new_users.toLocaleString();
-                        document.getElementById('day1Retention').innerText = yesterday.day1_rate + '%';
+                    // 获取昨日（今天-1）的留存数据
+                    const yesterday = new Date();
+                    yesterday.setDate(yesterday.getDate() - 1);
+                    const yesterdayStr = yesterday.toISOString().split('T')[0];
+                    const yesterdayData = retentionData.data.trend.find(item => item.date === yesterdayStr);
+                    if (yesterdayData) {
+                        document.getElementById('yesterdayNewUsers').innerText = yesterdayData.total_new_users.toLocaleString();
+                        document.getElementById('day1Retention').innerText = yesterdayData.day1_rate + '%';
                     }
                 }
 
