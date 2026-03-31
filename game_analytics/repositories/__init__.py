@@ -173,14 +173,20 @@ class ClickHouseRepository:
             WHERE first_login_date >= toDate(today()) - {days}
             GROUP BY first_login_date
         ),
+        new_user_list AS (
+            SELECT user_id, first_login_date as date
+            FROM users FINAL
+            WHERE first_login_date >= toDate(today()) - {days}
+        ),
         daily_retention AS (
             SELECT 
-                toDate(event_time) - 1 as date,
-                uniq(user_id) as retained_count
-            FROM game_events
-            WHERE event_name = 'login'
-              AND toDate(event_time) >= toDate(today()) - {days} + 1
-            GROUP BY toDate(event_time) - 1
+                n.date as date,
+                uniq(e.user_id) as retained_count
+            FROM new_user_list n
+            INNER JOIN game_events e ON n.user_id = e.user_id
+            WHERE e.event_name = 'login'
+              AND toDate(e.event_time) = n.date + 1
+            GROUP BY n.date
         )
         SELECT 
             d.calc_date as date,
