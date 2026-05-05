@@ -10,178 +10,158 @@ A real-time game data analytics platform with:
 - **Message Queue**: Kafka for event streaming
 - **Frontend**: HTML/CSS/JS with ECharts visualization
 
-## Build & Run Commands
+## Developer Commands
 
-### Python (Primary Stack)
+### Setup & Run
 
 ```bash
 # Install dependencies
 uv sync
 
+# Start infrastructure (ClickHouse + Kafka)
+docker-compose up -d
+
 # Run Flask application
 uv run main.py
 
-# Run data simulator (generates events to Kafka continuously)
-uv run scripts/simulate.py
-
-# Run Kafka consumer (writes to ClickHouse)
+# Run Kafka consumer (writes events to ClickHouse)
 uv run scripts/consume.py
+
+# Run data simulator (generates events to Kafka continuously, ~500 events/hour)
+uv run scripts/simulate.py
+```
+
+### Production (gunicorn)
+
+```bash
+# Serve with gunicorn (installed in pyproject.toml)
+uv run gunicorn -w 4 -b 0.0.0.0:5000 "game_analytics:create_app()"
 ```
 
 ### Infrastructure
 
 ```bash
-# Start ClickHouse and Kafka
-docker-compose up -d
-
 # Stop services
 docker-compose down
 
 # View logs
 docker-compose logs -f
+
+# Access ClickHouse CLI
+docker exec -it clickhouse clickhouse-client
 ```
 
-### Testing
+### Manual Testing
+
+No test suite is configured. Verify via:
 
 ```bash
-# Run all tests (when tests are added)
-uv run pytest
-
-# Run a single test file
-uv run pytest tests/test_file.py
-
-# Run a specific test function
-uv run pytest tests/test_file.py::test_function_name
-
-# Run tests with coverage
-uv run pytest --cov=game_analytics
+curl http://127.0.0.1:5000/api/overview
+curl http://127.0.0.1:5000/api/level-distribution
+curl http://127.0.0.1:5000/api/funnel/default
+curl http://127.0.0.1:5000/api/retention/2026-03-30
+curl "http://127.0.0.1:5000/api/retention/trend?days=7"
+curl -X POST http://127.0.0.1:5000/api/query-sql -H "Content-Type: application/json" -d '{"sql": "SELECT * FROM game_events LIMIT 10"}'
 ```
 
-### Code Quality
+## Architecture
 
-```bash
-# Format code with ruff (if available)
-uv run ruff format .
+### Data Flow
 
-# Check code style
-uv run ruff check .
-
-# Auto-fix style issues
-uv run ruff check . --fix
+```
+Simulator (continuous) → Kafka (tp_game_events) → Consumer → ClickHouse
+                                                              ↓
+                                              Flask Backend ← Dashboard UI
 ```
 
-## Code Style Guidelines
+### ClickHouse Tables
 
-### Python
+- `game_events` - Main event table (MergeTree, partitioned by day)
+- `users` - User tracking table
+- `users_auto_mv` - Materialized view for auto user creation
+- `daily_metrics` - Pre-aggregated daily counts/revenue by event_name (SummingMergeTree)
+- `daily_metrics_mv` - Auto-populated from game_events INSERTs
+- `daily_active_users` - Deduplicated daily active users (ReplacingMergeTree)
+- `daily_active_users_mv` - Auto-populated from game_events INSERTs
 
-- **Python version**: 3.14+
-- **Package manager**: uv (not pip) - use `uv sync` and `uv run`
-- **Imports order**:
-  1. Standard library imports (e.g., `json`, `datetime`, `pathlib`)
-  2. Third-party imports (e.g., `flask`, `kafka`, `clickhouse_connect`)
-  3. Local imports (e.g., `from game_analytics.models import Event`)
-  - Use blank lines between each group
-- **Formatting**: Follow PEP 8, use 4-space indentation
-- **Quotes**: Use double quotes for strings, single quotes acceptable for internal use
-- **Functions**: Use snake_case
-- **Classes**: Use PascalCase
-- **Constants**: UPPER_CASE at module level (e.g., `SERVERS`, `RANKS`, `DEVICES`)
-- **Comments**: Use Chinese comments for business logic, English for technical notes
-- **Error handling**: Use try/except blocks with specific error messages
-  - Always catch specific exceptions, not bare `except:`
-  - Log errors with context using print() or logging
-- **Flask routes**: Use @app.route decorators, return jsonify responses
-- **API responses**: Use make_response() helper for standardized format (code, data, msg)
-- **Dataclasses**: Use @dataclass for data models (Event, Player, etc.)
-- **Type hints**: Optional but encouraged, especially for function return types
+**Note:** Repository layer auto-detects if materialized views exist. If not, it falls back to scanning `game_events` directly.
 
-### General
+### Package Structure
 
-- Keep constants in UPPER_CASE (SERVERS, RANKS, DEVICES, etc.)
-- Use dataclasses for data models with proper type annotations
-- Prefer explicit error handling over silent failures
-- Use meaningful variable names, avoid abbreviations unless obvious
-- Use pathlib.Path for file operations
-- Follow singleton pattern for repository classes
+```
+game_analytics/          # Flask package
+├── __init__.py         # Exports create_app, Config
+├── app.py              # App factory, make_response helper, registers blueprints
+├── config.py           # Config class (reads env vars)
+├── models/             # Data models (Event dataclass)
+├── repositories/       # ClickHouse data access (singleton pattern)
+├── services/           # Business logic (AnalyticsService, EventSimulator)
+└── routes/             # Blueprint-based API routes
+    ├── overview.py     # GET /api/overview
+    ├── distribution.py # GET /api/level-distribution
+    ├── retention.py    # GET /api/retention/<date>, GET /api/retention/trend
+    ├── funnel.py       # GET /api/funnel/default (windowFunnel conversion)
+    └── query.py        # POST /api/query-sql
 
-## Testing
+scripts/                # Executable scripts
+├── simulate.py                     # Event simulator (main)
+├── consume.py                      # Kafka consumer
+├── simulate_patch.py               # Simulator patch/utility
+├── insert_specific_date.py         # Backfill data for specific dates
+└── create_daily_metrics_mv.sql     # DDL for materialized views (run once)
 
-No formal test suite is currently configured. Manual testing via:
-1. Run `docker-compose up -d`
-2. Start Flask app: `uv run main.py`
-3. Generate events: `uv run scripts/simulate.py`
-4. Access dashboard at `http://127.0.0.1:5000`
-5. Verify API endpoints:
-   - `curl http://127.0.0.1:5000/api/overview`
-   - `curl http://127.0.0.1:5000/api/level-distribution`
-   - `curl http://127.0.0.1:5000/api/retention/2026-03-30`
-   - `curl "http://127.0.0.1:5000/api/retention/trend?days=7"`
+main.py                 # Entry point (creates app, runs dev server on 0.0.0.0:5000)
+templates/index.html    # Dashboard UI
+```
 
 ## API Endpoints
 
-- `GET /` - Dashboard UI (renders index.html)
-- `GET /api/overview` - Daily statistics (DAU, matches, revenue)
-- `GET /api/level-distribution` - Player level distribution
-- `GET /api/retention/<date>` - Retention data for specific date (e.g., 2026-03-30)
-- `GET /api/retention/trend?days=7` - Retention trend for recent days
-- `POST /api/query-sql` - Execute custom SQL queries
-  - Body: `{"sql": "SELECT * FROM game_events LIMIT 10"}`
-  - Returns: `{code, data: {columns, rows}, msg}`
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Dashboard UI |
+| GET | `/api/overview` | Daily stats (DAU, matches, revenue) |
+| GET | `/api/level-distribution` | Player level distribution |
+| GET | `/api/funnel/default` | Today's conversion funnel: `match_start → match_end → skin_buy` (windowFunnel 7200s) |
+| GET | `/api/retention/<date>` | Retention for specific date (day-1, day-3, day-7) |
+| GET | `/api/retention/trend?days=N` | Retention trend for last N days |
+| POST | `/api/query-sql` | Execute custom ClickHouse SQL |
 
-## Project Structure
+## Code Conventions
 
-```
-/Users/zyq/my-projects/Playsight/
-├── game_analytics/       # Main Flask package
-│   ├── __init__.py      # Package init with create_app
-│   ├── app.py           # Flask app factory, make_response helper
-│   ├── config.py        # Configuration class
-│   ├── models/          # Data models (Event dataclass)
-│   ├── repositories/    # ClickHouse data access (singleton pattern)
-│   ├── services/        # Business logic (AnalyticsService, EventSimulator)
-│   └── routes/          # API routes (blueprints)
-│       ├── overview.py  # Dashboard and overview API
-│       ├── distribution.py  # Level distribution API
-│       ├── retention.py # Retention analytics API
-│       └── query.py     # SQL console API
-├── scripts/             # Executable scripts
-│   ├── simulate.py      # Event simulator (runs 24/7)
-│   └── consume.py       # Kafka consumer
-├── main.py              # Application entry point
-├── templates/           # HTML templates
-│   └── index.html       # Dashboard UI
-├── docker-compose.yml   # ClickHouse + Kafka services
-├── pyproject.toml       # Python dependencies (uv)
-├── requirements.txt     # Additional deps (kafka-python-ng)
-└── uv.lock             # Locked dependencies
-```
-
-## Dependencies
-
-### Python (pyproject.toml)
-- clickhouse-connect >= 0.14.0
-- flask >= 3.1.3
-- kafka-python-ng
-
-### Infrastructure
-- ClickHouse Server 23.x
-- Apache Kafka (latest)
-- Docker & Docker Compose
+- **Python**: 3.14, managed by `uv` (not pip)
+- **Package manager**: Always use `uv sync` and `uv run`
+- **Quotes**: Double quotes for strings
+- **Naming**: snake_case for functions/variables, PascalCase for classes, UPPER_CASE for constants
+- **Comments**: Chinese for business logic, English for technical notes
+- **Error handling**: Catch specific exceptions, never bare `except:`
+- **API responses**: Use `make_response()` from `app.py` returning `{code, data, msg}`
+- **Repositories**: Singleton pattern
+- **Models**: Use `@dataclass` with type annotations
 
 ## Environment Variables
 
-- `CLICKHOUSE_HOST` - ClickHouse host (default: localhost)
-- `CLICKHOUSE_PORT` - ClickHouse port (default: 8123)
-- `CLICKHOUSE_DATABASE` - Database name (default: game)
-- `KAFKA_BOOTSTRAP_SERVERS` - Kafka brokers (default: localhost:9092)
-- `KAFKA_TOPIC_EVENTS` - Kafka topic (default: tp_game_events)
-- `FLASK_PORT` - Flask port (default: 5000)
-- `FLASK_DEBUG` - Debug mode (default: true)
-- `SIMULATE_SPEED_UP` - Simulation speed multiplier (default: 60)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLICKHOUSE_HOST` | `localhost` | ClickHouse host |
+| `CLICKHOUSE_PORT` | `8123` | ClickHouse HTTP port |
+| `CLICKHOUSE_DATABASE` | `game` | Database name |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka brokers |
+| `KAFKA_TOPIC_EVENTS` | `tp_game_events` | Kafka topic |
+| `FLASK_PORT` | `5000` | Flask port |
+| `FLASK_DEBUG` | `true` | Debug mode |
+| `SIMULATE_SPEED_UP` | `60` | Simulator speed multiplier |
+
+## Gotchas
+
+- **Kafka advertised listeners**: `docker-compose.yml` uses `localhost:9092`. For remote deployment, change `KAFKA_ADVERTISED_LISTENERS` to the server's internal IP (see DEPLOY.md)
+- **main.py disables SERVER_NAME**: `app.config["SERVER_NAME"] = None` is set after create_app() - do not remove
+- **main.py runs with debug=False**: Despite `FLASK_DEBUG` defaulting to `true`, main.py explicitly sets `debug=False`
+- **ClickHouse schema not auto-created**: Tables must be created manually (see DEPLOY.md for DDL)
+- **Materialized views are optional**: Repository auto-detects and falls back to `game_events` scan if MVs don't exist
+- **Simulator runs continuously**: It does not stop on its own; use Ctrl+C to terminate
+- **Topic auto-creation**: Kafka is configured with `KAFKA_AUTO_CREATE_TOPICS_ENABLE=true`
 
 ## Git
 
-- No pre-commit hooks configured
-- Standard .gitignore for Python, Java, IDE files, and OS files
-- Commit messages: Use English, describe the "why" not just the "what"
-- Follow conventional commits format if possible
+- No pre-commit hooks
+- Commit messages: English, describe the "why"

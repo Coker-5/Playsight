@@ -186,6 +186,50 @@ PARTITION BY toYYYYMMDD(event_time);
 exit
 ```
 
+### 5.1. 创建物化视图（可选但推荐）
+
+> 物化视图可大幅提升 DAU/对局/收入查询速度，数据量大时建议启用。
+
+```bash
+# 进入 ClickHouse 容器
+docker exec -it clickhouse clickhouse-client
+
+# 执行 DDL 脚本
+CREATE TABLE IF NOT EXISTS daily_metrics (
+    event_date Date,
+    event_name String,
+    event_count UInt64,
+    revenue Float32
+) ENGINE = SummingMergeTree()
+ORDER BY (event_date, event_name);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS daily_metrics_mv
+TO daily_metrics
+AS SELECT
+    toDate(event_time) AS event_date,
+    event_name,
+    count() AS event_count,
+    sum(toFloat32OrNull(properties['price'])) AS revenue
+FROM game_events
+GROUP BY event_date, event_name;
+
+CREATE TABLE IF NOT EXISTS daily_active_users (
+    event_date Date,
+    user_id String
+) ENGINE = ReplacingMergeTree()
+ORDER BY (event_date, user_id);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS daily_active_users_mv
+TO daily_active_users
+AS SELECT
+    toDate(event_time) AS event_date,
+    user_id
+FROM game_events;
+
+# 退出
+exit
+```
+
 ### 6. 安装 Python 依赖并启动应用
 
 ```bash
