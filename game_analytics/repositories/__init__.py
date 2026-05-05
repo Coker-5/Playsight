@@ -15,6 +15,7 @@ class ClickHouseRepository:
         self.host = Config.CLICKHOUSE_HOST
         self.port = Config.CLICKHOUSE_PORT
         self.database = Config.CLICKHOUSE_DATABASE
+        self._has_mv_cache: bool | None = None
 
     def _get_client(self):
         """获取 ClickHouse 客户端（每次查询创建新实例避免并发问题）"""
@@ -34,15 +35,40 @@ class ClickHouseRepository:
         client = self._get_client()
         client.insert(table, data)
 
+    def _has_materialized_views(self) -> bool:
+        """检查物化视图是否已创建（结果缓存）"""
+        if self._has_mv_cache is not None:
+            return self._has_mv_cache
+        try:
+            result = self.query(
+                "SELECT count() FROM system.tables "
+                f"WHERE database = '{self.database}' AND name = 'daily_metrics'"
+            )
+            self._has_mv_cache = result.result_rows[0][0] > 0
+        except Exception:
+            self._has_mv_cache = False
+        return self._has_mv_cache
+
     def get_today_dau(self) -> int:
         """获取今日 DAU"""
-        result = self.query(
-            "SELECT uniq(user_id) FROM game_events WHERE toDate(event_time) = today()"
-        )
+        if self._has_materialized_views():
+            result = self.query(
+                "SELECT count() FROM daily_active_users WHERE event_date = today()"
+            )
+        else:
+            result = self.query(
+                "SELECT uniq(user_id) FROM game_events WHERE toDate(event_time) = today()"
+            )
         return result.result_rows[0][0]
 
     def get_today_match_count(self) -> int:
         """获取今日对局数"""
+        if self._has_materialized_views():
+            result = self.query(
+                "SELECT event_count FROM daily_metrics "
+                "WHERE event_date = today() AND event_name = 'match_end'"
+            )
+            return result.result_rows[0][0] if result.result_rows else 0
         result = self.query(
             "SELECT count(*) FROM game_events "
             "WHERE toDate(event_time) = today() AND event_name = 'match_end'"
@@ -51,6 +77,15 @@ class ClickHouseRepository:
 
     def get_today_skin_sales(self) -> Tuple[int, float]:
         """获取今日皮肤销售 (数量, 收入)"""
+        if self._has_materialized_views():
+            result = self.query(
+                "SELECT event_count, revenue FROM daily_metrics "
+                "WHERE event_date = today() AND event_name = 'skin_buy'"
+            )
+            row = result.result_rows[0] if result.result_rows else None
+            if row:
+                return row[0], float(row[1] or 0)
+            return 0, 0.0
         result = self.query(
             "SELECT count(*), sum(toFloat32(properties['price'])) "
             "FROM game_events "
